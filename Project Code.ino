@@ -1,0 +1,168 @@
+#define BLYNK_TEMPLATE_ID "TMPL3S19FfQu-"
+#define BLYNK_TEMPLATE_NAME "track fault detection"
+#define BLYNK_AUTH_TOKEN "wjDUg4AKs17S4bUspugQNprV7lxdLX3q"
+
+#define BLYNK_PRINT Serial
+
+#include <ESP8266WiFi.h>
+#include <BlynkSimpleEsp8266.h>
+#include <TinyGPS++.h>
+#include <SoftwareSerial.h>
+
+// -------- WIFI --------
+char ssid[] = "IPHONE";
+char pass[] = "@@@@@@@@";
+
+// -------- GPS --------
+TinyGPSPlus gps;
+SoftwareSerial gpsSerial(D7, D8); // RX, TX
+
+// -------- PINS --------
+#define IN1 D1
+#define IN2 D2
+#define IN3 D5
+#define IN4 D6
+
+#define IR1 D3
+#define IR2 D4
+
+#define BUZZER D0
+
+// -------- VARIABLES --------
+int systemON = 0;
+
+bool motorStopped = false;
+bool ignoreCrack = false;
+bool gpsReady = false;
+
+unsigned long stopTime = 0;
+unsigned long ignoreStart = 0;
+
+const unsigned long pauseDuration = 5000;
+const unsigned long ignoreDuration = 5000;
+
+// -------- BLYNK BUTTONS --------
+BLYNK_WRITE(V2) {
+  systemON = param.asInt();
+}
+
+BLYNK_WRITE(V4) {
+  if (param.asInt() == 1) {
+    Blynk.virtualWrite(V0, 0);
+    Blynk.virtualWrite(V1, 0);
+    Blynk.virtualWrite(V3, "");
+    Serial.println("🧹 Data Cleared");
+  }
+}
+
+// -------- MOTOR --------
+void forward() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH);
+  digitalWrite(IN4, LOW);
+}
+
+void stopMotor() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW);
+  digitalWrite(IN4, LOW);
+}
+
+// -------- SETUP --------
+void setup() {
+  Serial.begin(9600);
+  gpsSerial.begin(9600);
+
+  Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
+
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT);
+  pinMode(IN4, OUTPUT);
+
+  pinMode(IR1, INPUT);
+  pinMode(IR2, INPUT);
+
+  pinMode(BUZZER, OUTPUT);
+}
+
+// -------- LOOP --------
+void loop() {
+
+  Blynk.run();
+
+  // -------- GPS READ (ALWAYS FIRST) --------
+  while (gpsSerial.available() > 0) {
+    gps.encode(gpsSerial.read());
+  }
+
+  if (gps.location.isValid() && !gpsReady) {
+    gpsReady = true;
+    Serial.println("✅ GPS Ready");
+
+    Blynk.virtualWrite(V5, 1);  // LED ON
+  }
+
+  // -------- SYSTEM OFF / GPS WAIT --------
+  if (systemON == 0 || !gpsReady) {
+    stopMotor();
+    Serial.println("Waiting for GPS...");
+    
+    Blynk.virtualWrite(V5, 0);  // LED OFF
+    
+    return;
+  }
+
+  int leftIR = digitalRead(IR1);
+  int rightIR = digitalRead(IR2);
+
+  // -------- CRACK DETECT --------
+  if ((leftIR == LOW || rightIR == LOW) && !ignoreCrack && !motorStopped) {
+
+    stopMotor();
+    motorStopped = true;
+    ignoreCrack = true;
+
+    stopTime = millis();
+    ignoreStart = millis();
+
+    digitalWrite(BUZZER, HIGH);
+
+    Serial.println("🚨 CRACK DETECTED!");
+
+    float lat = gps.location.lat();
+    float lon = gps.location.lng();
+
+    Serial.print("Lat: ");
+    Serial.println(lat, 6);
+    Serial.print("Lon: ");
+    Serial.println(lon, 6);
+
+    Blynk.virtualWrite(V0, lat);
+    Blynk.virtualWrite(V1, lon);
+
+    String link = "https://maps.google.com/?q=" + String(lat,6) + "," + String(lon,6);
+    Blynk.virtualWrite(V6, link);
+  }
+
+  // -------- AUTO START --------
+  if (motorStopped && millis() - stopTime >= pauseDuration) {
+    forward();
+    motorStopped = false;
+    digitalWrite(BUZZER, LOW);
+
+    Serial.println("✅ Motor Started After 5 sec");
+  }
+
+  // -------- IGNORE SAME CRACK --------
+  if (ignoreCrack && millis() - ignoreStart >= ignoreDuration) {
+    ignoreCrack = false;
+  }
+
+  // -------- NORMAL RUN --------
+  if (!motorStopped) {
+    forward();
+  }
+}
